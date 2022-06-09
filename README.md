@@ -35,6 +35,7 @@ Parameters
   --vm-state                     Save VM state (RAM) during snapshot. If not present state is not saved.
   --vm-snap-desc   [desc]        Desciption of snapshot (default: zfsbackup).
   --vm-conf-dest   [destination] Destionation to copy VM config to. If not set VM config is not backuped.
+  --vm-no-freeze                 Do not freeze VM file system before creating a snapshot. By default a fsfreeze is exucuted and script exits if this fails, i.e if no qemu agent is installed.
 
   -st, --src-type  [ssh|local]   Type of source dataset: 'local' or 'local' (default: local).
   -ss, --src-snaps [count]       Number (greater 0) of successful sent snapshots to keep on source side (default: 1).
@@ -44,11 +45,12 @@ Parameters
   -ds, --dst-snaps [count]       Number (greater 0) of successful received snapshots to keep on destination side (default: 1).
   -dp, --dst-prop  [properties]  Properties to set on destination after first sync. User ',' separated list of 'property=value'
                                  If 'inherit' is used as value 'zfs inherit' is executed otherwise 'zfs set'.
-                                 Default: 'canmount=off,mountpoint=none,readonly=on'
+                                 Default: 'readonly=on'
   -i,  --id        [name]        Unique ID of backup destination (default: md5sum of destination dataset and ssh host, if present).
                                  Required if you use multiple destinations to identify snapshots. Maximum of 10 characters or numbers.
   --send-param     [parameters]  Parameters used for 'zfs send' command. If set these parameters are use and all other settings (see below) are ignored.
   --recv-param     [parameters]  Parameters used for 'zfs receive' command. If set these parameters are use and all other settings (see below) are ignored.
+  --bookmark                     Use bookmark (if supported) instead of snapshot on source dataset. Ignored if '-ss, --src-count' is greater 1.
   --resume                       Make sync resume able and resume interrupted streams. User '-s' option during receive.
   --intermediary                 Use '-I' instead of '-i' while sending to keep intermediary snapshots.
                                  If set, created but not send snapshots are kept, otherwise they are deleted.
@@ -58,6 +60,7 @@ Parameters
   --decrypt                      By default encrypted source datasets are send in raw format using send option '-w'.
                                  This options disables that and sends encrypted (mounted) datasets in plain.
   --no-holds                     Do not put hold tag on snapshots created by this tool.
+  --no-holds-dest                Do not put hold tag on destination snapshots.
   --only-if        [command]     Command or script to check preconditions, if command fails backup is not started.
                                  Examples:
                                  check IP: [[ \"\$(ip -4 addr show wlp5s0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}')\" =~ 192\.168\.2.* ]]

@@ -2,7 +2,7 @@
 # shellcheck disable=SC2091
 # shellcheck disable=SC2086
 
-readonly VERSION='1.0.0'
+readonly VERSION='1.0.1'
 
 # return codes
 readonly EXIT_OK=0
@@ -78,6 +78,7 @@ MOUNT=false
 BOOKMARK=false
 NO_OVERRIDE=false
 NO_HOLD=false
+NO_HOLD_DEST=false
 MAKE_CONFIG=false
 DEBUG=false
 DRYRUN=false
@@ -136,6 +137,8 @@ readonly INTERMEDIATE_HElP=("Use '-I' instead of '-i' while sending to keep inte
 readonly NO_OVERRIDE_HElP=("By default option '-F' is used during receive to discard changes made in destination dataset." "If you use this option receive will fail if destination was changed.")
 readonly DECRYPT_HElP=("By default encrypted source datasets are send in raw format using send option '-w'." "This options disables that and sends encrypted (mounted) datasets in plain.")
 readonly NO_HOLD_HELP="Do not put hold tag on snapshots created by this tool."
+readonly NO_HOLD_NOTE="NOTE: If you do not use bookmarks and use replication on you pve hosts disable holds on your snapshot because migrations will fail since old snapshots could not be removed."
+readonly NO_HOLD_DEST_HELP="Do not put hold tag on destination snapshots."
 readonly LOG_FILE_HELP="Logfile to log to."
 readonly DEBUG_HELP="Print executed commands and other debugging information."
 
@@ -198,6 +201,7 @@ Parameters
   --decrypt                      ${DECRYPT_HElP[0]}
                                  ${DECRYPT_HElP[1]}
   --no-holds                     $NO_HOLD_HELP
+  --no-holds-dest                $NO_HOLD_DEST_HELP
   --only-if        [command]     ${ONLY_IF_HELP[0]}
                                  ${ONLY_IF_HELP[1]}
                                  ${ONLY_IF_HELP[2]}
@@ -236,7 +240,7 @@ Help
 
 function help_permissions_send() {
   local current_user
-  if [ "$SRC_TYPE" == "$TYPE_SSH" ] && [ "$SSH_USER" != "" ]; then
+  if [ "$SRC_TYPE" = "$TYPE_SSH" ] && [ "$SSH_USER" != "" ]; then
     current_user=$SSH_USER
   else
     current_user=$(whoami)
@@ -248,7 +252,7 @@ function help_permissions_send() {
 
 function help_permissions_receive() {
   local current_user
-  if [ "$DST_TYPE" == "$TYPE_SSH" ] && [ "$SSH_USER" != "" ]; then
+  if [ "$DST_TYPE" = "$TYPE_SSH" ] && [ "$SSH_USER" != "" ]; then
     current_user=$SSH_USER
   else
     current_user=$(whoami)
@@ -332,7 +336,7 @@ while [[ $# -gt 0 ]]; do
     shift
     ;;
   --send-param)
-    if [ "${2:0:1}" == "-" ]; then
+    if [ "${2:0:1}" = "-" ]; then
       SEND_PARAMETER="$2"
     else
       SEND_PARAMETER="-$2"
@@ -340,11 +344,15 @@ while [[ $# -gt 0 ]]; do
     shift
     ;;
   --recv-param)
-    if [ "${2:0:1}" == "-" ]; then
+    if [ "${2:0:1}" = "-" ]; then
       RECEIVE_PARAMETER="$2"
     else
       RECEIVE_PARAMETER="-$2"
     fi
+    shift
+    ;;
+  --bookmark)
+    BOOKMARK=true
     shift
     ;;
   --resume)
@@ -369,6 +377,10 @@ while [[ $# -gt 0 ]]; do
     ;;
   --no-holds)
     NO_HOLD=true
+    shift
+    ;;
+  --no-holds-desg)
+    NO_HOLD_DEST=true
     shift
     ;;
   --only-if)
@@ -479,7 +491,7 @@ function log() {
 }
 
 function log_debug() {
-  if [ "$DEBUG" == "true" ]; then
+  if [ "$DEBUG" = "true" ]; then
     log "$1" "$LOG_DEBUG"
   fi
 }
@@ -497,7 +509,7 @@ function log_error() {
 }
 
 function log_cmd() {
-  if [ "$DEBUG" == "true" ]; then
+  if [ "$DEBUG" = "true" ]; then
     log "executing: '$1'" "$LOG_CMD"
   fi
 }
@@ -580,6 +592,15 @@ function zpool_exists_cmd() {
   echo "$1 list $pool"
 }
 
+# command used to test if pool supports bookmarks
+# $1 zpool command
+# $2 dataset name
+function zpool_bookmarks_cmd() {
+  local pool
+  pool="$(zpool "$2")"
+  echo "$1 get -Hp -o value feature@bookmarks $pool"
+}
+
 # command used to test if pool supports encryption
 # $1 zpool command
 # $2 dataset name
@@ -594,7 +615,7 @@ function zpool_encryption_cmd() {
 # $2 dataset name
 function pool_exists() {
   local cmd
-  if [ "$1" == "true" ]; then
+  if [ "$1" = "true" ]; then
     cmd="$(build_cmd "$SRC_TYPE" "$(zpool_exists_cmd $ZPOOL_CMD "$2")")"
   else
     cmd="$(build_cmd "$DST_TYPE" "$(zpool_exists_cmd $ZPOOL_CMD_REMOTE "$2")")"
@@ -604,13 +625,26 @@ function pool_exists() {
   return
 }
 
+# test if pool supports bookmarks
+# $1 is source
+function pool_support_bookmarks() {
+  local cmd
+  if [ "$1" == "true" ]; then
+    cmd="$(build_cmd "$SRC_TYPE" "$(zpool_bookmarks_cmd $ZPOOL_CMD "$1")")"
+  else
+    cmd="$(build_cmd "$DST_TYPE" "$(zpool_bookmarks_cmd $ZPOOL_CMD_REMOTE "$1")")"
+  fi
+  log_cmd "$cmd"
+  [[ $($cmd) != "disabled" ]] &>/dev/null
+  return
+}
+
 # test if pool supports encryption
 # $1 is source
 # $2 dataset name
 function pool_support_encryption() {
   local cmd
-  local pool
-  if [ "$1" == "true" ]; then
+  if [ "$1" = "true" ]; then
     cmd="$(build_cmd "$SRC_TYPE" "$(zpool_encryption_cmd $ZPOOL_CMD "$2")")"
   else
     cmd="$(build_cmd "$DST_TYPE" "$(zpool_encryption_cmd $ZPOOL_CMD_REMOTE "$2")")"
@@ -654,6 +688,20 @@ function zfs_snapshot_list_cmd() {
   echo "$1 list -Hp -t snapshot -o name -s creation $2"
 }
 
+# command used to get a list of all bookmarks
+# $1 zfs command
+# $2 dataset name
+function zfs_bookmark_list_cmd() {
+  echo "$1 list -Hp -t bookmark -o name -s creation $2"
+}
+
+# command used to get a list of all snapshots and bookmarks
+# $1 zfs command
+# $2 dataset name
+function zfs_snapshot_bookmark_list_cmd() {
+  echo "$1 list -Hrp -t snapshot,bookmark -o name -s creation $2"
+}
+
 # command used to create a new snapshots
 # $1 zfs command
 # $2 dataset name
@@ -665,13 +713,20 @@ function zfs_snapshot_create_cmd() {
 # $1 zfs command
 # $2 snapshot name
 function zfs_snapshot_destroy_cmd() {
-  if [[ "$2" =~ .*[@].* ]]; then
+  if [[ "$2" =~ .*[@#].* ]]; then
     echo "$1 destroy $2"
   else
-    log_error "Preventing destroy command for '$2' not containing '@', since we only destroy snapshots."
+    log_error "Preventing destroy command for '$2' not containing '@' or '#', since we only destroy snapshots or bookmarks."
     log_error "Abort backup."
     stop $EXIT_ERROR
   fi
+}
+
+# command used to test if snapshot has hold
+# $1 zfs command
+# $2 snapshot name
+function zfs_snapshot_holds_cmd() {
+  echo "$1 holds -H $2"
 }
 
 # command used to hold a snapshot
@@ -715,16 +770,16 @@ function zfs_snapshot_send_cmd() {
     cmd="$cmd $SEND_PARAMETER"
   else
     cmd="$cmd $DEFAULT_SEND_PARAMETER"
-    if [ "$FIRST_RUN" == "true" ] && [ "$SRC_DECRYPT" == "false" ]; then
+    if [ "$FIRST_RUN" = "true" ] && [ "$SRC_DECRYPT" = "false" ]; then
       cmd="$cmd -p"
     fi
-    if [ "$SRC_ENCRYPTED" == "true" ] && [ "$SRC_DECRYPT" == "false" ]; then
+    if [ "$SRC_ENCRYPTED" = "true" ] && [ "$SRC_DECRYPT" = "false" ]; then
       cmd="$cmd -w"
     fi
   fi
   if [ -z "$2" ]; then
     cmd="$cmd $3"
-  elif [ "$INTERMEDIATE" == "true" ]; then
+  elif [ "$INTERMEDIATE" = "true" ]; then
     cmd="$cmd -I $2 $3"
   else
     cmd="$cmd -i $2 $3"
@@ -742,10 +797,10 @@ function zfs_snapshot_receive_cmd() {
   if [ -n "$RECEIVE_PARAMETER" ]; then
     cmd="$cmd $RECEIVE_PARAMETER"
   else
-    if [ "$RESUME" == "true" ]; then
+    if [ "$RESUME" = "true" ]; then
       cmd="$cmd -s"
     fi
-    if [ "$MOUNT" == "false" ]; then
+    if [ "$MOUNT" = "false" ]; then
       cmd="$cmd -u"
     fi
     if [[ -z "$3" && ("$FIRST_RUN" == "true" || "$NO_OVERRIDE" == "false") ]]; then
@@ -754,6 +809,23 @@ function zfs_snapshot_receive_cmd() {
   fi
   cmd="$cmd $2"
   echo "$cmd"
+}
+
+# command used to create a bookmark from snapshots
+# $1 zfs command
+# $2 snapshot name
+function zfs_bookmark_create_cmd() {
+  local bookmark
+  # shellcheck disable=SC2001
+  bookmark=$(sed "s/@/#/g" <<<"$2")
+  echo "$1 bookmark $2 $bookmark"
+}
+
+# command used to destroy a bookmark
+# $1 zfs command
+# $2 bookmark name
+function zfs_bookmark_destroy_cmd() {
+  echo "$1 destroy $2"
 }
 
 # command used to get resume token
@@ -785,9 +857,9 @@ function qm_fs_thaw_cmd() {
   echo "$QM_CMD guest cmd $VM_ID fsfreeze-thaw"
 }
 
-# remove dataset from snapshot fully qualified name
+# remove dataset from snapshot or bookmark fully qualified name
 # $1 dataset name
-# $2 full name including snapshot name
+# $2 full name including snapshot/bookmark name
 function snapshot_name() {
   if [ -n "$1" ] && [ -n "$2" ] && [ ${#2} -gt ${#1} ]; then
     echo "${2:${#1}+1}"
@@ -820,7 +892,7 @@ function dataset_last_node() {
 # $1 is source
 function dataset_list() {
   local cmd
-  if [ "$1" == "true" ]; then
+  if [ "$1" = "true" ]; then
     echo "Following source datasets are available:"
     cmd="$(build_cmd "$SRC_TYPE" "$(zfs_list_cmd $ZFS_CMD)")"
   else
@@ -836,7 +908,7 @@ function dataset_list() {
 # $2 dataset
 function dataset_exists() {
   local cmd
-  if [ "$1" == "true" ]; then
+  if [ "$1" = "true" ]; then
     cmd="$(build_cmd "$SRC_TYPE" "$(zfs_exist_cmd $ZFS_CMD "$2")")"
   else
     cmd="$(build_cmd "$DST_TYPE" "$(zfs_exist_cmd $ZFS_CMD_REMOTE "$2")")"
@@ -850,7 +922,7 @@ function dataset_exists() {
 # $2 dataset
 function dataset_encrypted() {
   local cmd
-  if [ "$1" == "true" ]; then
+  if [ "$1" = "true" ]; then
     cmd="$(build_cmd "$SRC_TYPE" "$(zfs_encryption_cmd $ZFS_CMD "$2")")"
   else
     cmd="$(build_cmd "$DST_TYPE" "$(zfs_encryption_cmd $ZFS_CMD_REMOTE "$2")")"
@@ -864,10 +936,37 @@ function dataset_encrypted() {
 # $2 dataset
 function dataset_list_snapshots() {
   local cmd
-  if [ "$1" == "true" ]; then
+  if [ "$1" = "true" ]; then
     cmd="$(build_cmd "$SRC_TYPE" "$(zfs_snapshot_list_cmd $ZFS_CMD "$2")")"
   else
     cmd="$(build_cmd "$DST_TYPE" "$(zfs_snapshot_list_cmd $ZFS_CMD_REMOTE "$2")")"
+  fi
+  log_cmd "$cmd"
+  # shellcheck disable=SC2005
+  echo "$($cmd)"
+}
+
+# $1 is source
+function dataset_list_bookmarks() {
+  local cmd
+  if [ "$1" == "true" ]; then
+    cmd="$(build_cmd "$SRC_TYPE" "$(zfs_bookmark_list_cmd $ZFS_CMD "$SRC_DATASET")")"
+  else
+    cmd="$(build_cmd "$DST_TYPE" "$(zfs_bookmark_list_cmd $ZFS_CMD_REMOTE "$DST_DATASET")")"
+  fi
+  log_cmd "$cmd"
+  # shellcheck disable=SC2005
+  echo "$($cmd)"
+}
+
+# $1 is source
+# $2 dataset
+function dataset_list_snapshots_bookmarks() {
+  local cmd
+  if [ "$1" == "true" ]; then
+    cmd="$(build_cmd "$SRC_TYPE" "$(zfs_snapshot_bookmark_list_cmd $ZFS_CMD "$2")")"
+  else
+    cmd="$(build_cmd "$DST_TYPE" "$(zfs_snapshot_bookmark_list_cmd $ZFS_CMD_REMOTE "$2")")"
   fi
   log_cmd "$cmd"
   # shellcheck disable=SC2005
@@ -883,11 +982,26 @@ function dataset_resume_token() {
   echo "$($cmd)"
 }
 
+# $1 is source
+# $2 snapshot name
+function dataset_snapshot_holds() {
+  local cmd
+  cmd=
+  if [ "$1" = "true" ]; then
+    cmd="$(build_cmd $SRC_TYPE "$(zfs_snapshot_holds_cmd $ZFS_CMD "$2")")"
+  else
+    cmd="$(build_cmd $DST_TYPE "$(zfs_snapshot_holds_cmd $ZFS_CMD_REMOTE "$2")")"
+  fi
+  log_cmd "$cmd"
+  # shellcheck disable=SC2005
+  echo "$($cmd)"
+}
+
 # $1 command
 # $2 no dryrun
 function execute() {
   log_cmd "$1"
-  if [ "$DRYRUN" == "true" ] && [ -z "$2" ]; then
+  if [ "$DRYRUN" = "true" ] && [ -z "$2" ]; then
     log_info "dryrun ... nothing done."
     return 0
   elif [ -n "$LOG_FILE" ]; then
@@ -904,7 +1018,7 @@ function execute() {
 function execute_snapshot_hold() {
   local cmd
   cmd=
-  if [ "$1" == "true" ]; then
+  if [ "$1" = "true" ]; then
     cmd="$(build_cmd $SRC_TYPE "$(zfs_snapshot_hold_cmd $ZFS_CMD "$2")")"
   else
     cmd="$(build_cmd $DST_TYPE "$(zfs_snapshot_hold_cmd $ZFS_CMD_REMOTE "$2")")"
@@ -924,7 +1038,7 @@ function execute_snapshot_hold() {
 # $2 snapshot name
 function execute_snapshot_release() {
   local cmd
-  if [ "$1" == "true" ]; then
+  if [ "$1" = "true" ]; then
     cmd="$(build_cmd $SRC_TYPE "$(zfs_snapshot_release_cmd $ZFS_CMD "$2")")"
   else
     cmd="$(build_cmd $DST_TYPE "$(zfs_snapshot_release_cmd $ZFS_CMD_REMOTE "$2")")"
@@ -942,7 +1056,7 @@ function execute_snapshot_release() {
 # $2 snapshot name
 function execute_snapshot_destroy() {
   local cmd
-  if [ "$1" == "true" ]; then
+  if [ "$1" = "true" ]; then
     cmd="$(build_cmd $SRC_TYPE "$(zfs_snapshot_destroy_cmd $ZFS_CMD "$2")")"
   else
     cmd="$(build_cmd $DST_TYPE "$(zfs_snapshot_destroy_cmd $ZFS_CMD_REMOTE "$2")")"
@@ -960,7 +1074,7 @@ function execute_snapshot_destroy() {
 # $2 bookmark name
 function execute_bookmark_destroy() {
   local cmd
-  if [ "$1" == "true" ]; then
+  if [ "$1" = "true" ]; then
     cmd="$(build_cmd $SRC_TYPE "$(zfs_bookmark_destroy_cmd $ZFS_CMD "$2")")"
   else
     cmd="$(build_cmd $DST_TYPE "$(zfs_bookmark_destroy_cmd $ZFS_CMD_REMOTE "$2")")"
@@ -1016,6 +1130,43 @@ function distro_dependent_commands() {
   fi
 }
 
+
+# $1 is source
+# $2 snapshot name
+function release_holds_and_destroy() {
+  local pattern
+  local escaped_src_dataset
+  local can_destroy
+  local holds
+
+  escaped_snapshot="${2//\//\\/}"
+  # shellcheck disable=SC1087
+  pattern="^${escaped_snapshot}[[:space:]][[:space:]]*${SNAPSHOT_HOLD_TAG}[[:space:]].*"
+  can_destroy="true"
+  log_debug "getting holds ..."
+  holds=$(dataset_snapshot_holds $1 $2)
+  log_debug "... found holds ..."
+  log_debug "$holds"
+  log_debug "... filter with pattern '$pattern'"
+  IFS=$'\n'
+  for hold in $holds; do
+    if [[ "$hold" =~ $pattern ]]; then
+      log_debug "found hold with tag '$SNAPSHOT_HOLD_TAG', trying to remove ..."
+      execute_snapshot_release $1 "$2"
+    else
+      can_destroy=false
+      log_debug "... '$hold' does not match pattern."
+    fi
+  done
+  unset IFS
+
+  if [ "$can_destroy" = "true" ]; then
+    execute_snapshot_destroy $1 "$2"
+  else
+    log_info "Cannot destroy snapshot '$2' because as least one other hold exists."
+  fi
+}
+
 # $1 dataset name
 function load_src_snapshots() {
   local pattern
@@ -1026,10 +1177,10 @@ function load_src_snapshots() {
 
   escaped_src_dataset="${1//\//\\/}"
   # shellcheck disable=SC1087
-  pattern="^${escaped_src_dataset}[@]${SNAPSHOT_PREFIX}_${ID}.*"
+  pattern="^${escaped_src_dataset}[#@]${SNAPSHOT_PREFIX}_${ID}.*"
   log_debug "getting source snapshot list ..."
   log_debug "... filter with pattern $pattern"
-  for snap in $(dataset_list_snapshots true $1); do
+  for snap in $(dataset_list_snapshots_bookmarks true $1); do
     if [[ "$snap" =~ $pattern ]]; then
       SRC_SNAPSHOTS+=("$snap")
       log_debug "... add $snap"
@@ -1080,7 +1231,7 @@ function load_dst_snapshots() {
     dst_name="$(snapshot_name $1 $DST_SNAPSHOT_LAST)"
     for snap in "${SRC_SNAPSHOTS[@]}"; do
       src_name="$(snapshot_name $2 $snap)"
-      if [ "$src_name" == "$dst_name" ]; then
+      if [ "$src_name" = "$dst_name" ]; then
         SRC_SNAPSHOT_LAST_SYNCED=$snap
       fi
     done
@@ -1141,10 +1292,10 @@ function validate() {
     exit_code=$EXIT_MISSING_PARAM
   fi
 
-  if [ "$SRC_TYPE" == "$TYPE_SSH" ] && [ "$DST_TYPE" == "$TYPE_SSH" ]; then
+  if [ "$SRC_TYPE" = "$TYPE_SSH" ] && [ "$DST_TYPE" = "$TYPE_SSH" ]; then
     log_error "You can use type 'ssh' only for source or destination but not both."
     exit_code=$EXIT_INVALID_PARAM
-  elif [ "$SRC_TYPE" == "$TYPE_SSH" ] || [ "$DST_TYPE" == "$TYPE_SSH" ]; then
+  elif [ "$SRC_TYPE" = "$TYPE_SSH" ] || [ "$DST_TYPE" = "$TYPE_SSH" ]; then
     if [ -z "$SSH_HOST" ]; then
       log_error "Missing parameter --ssh_host for sending or receiving host."
       exit_code=$EXIT_MISSING_PARAM
@@ -1197,6 +1348,24 @@ function validate_dataset() {
   else
     log_debug "... is not encrypted"
   fi
+
+  # bookmarks only make sense if snapshot count on source side is 1
+  if [ "$SRC_COUNT" = "1" ]; then
+    if [ "$BOOKMARK" = "true" ]; then
+      log_debug "checking if pool of source '$1' support bookmarks ..."
+      if pool_support_bookmarks true; then
+        log_debug "... bookmarks supported"
+        BOOKMARK=true
+      else
+        log_debug "... bookmarks not supported"
+        BOOKMARK=false
+      fi
+    fi
+  elif [ "$BOOKMARK" = "true" ]; then
+    log_warn "Bookmark option --bookmark will be ignored since you are using a snapshot count $SRC_COUNT which is greater then 1."
+    BOOKMARK=false
+  fi
+
   DST_DATASET_CURRENT="$DST_DATASET/$(dataset_last_node $1)"
   # if we passed basic validation we load snapshots to check if this is the first sync
   load_src_snapshots $1
@@ -1206,7 +1375,7 @@ function validate_dataset() {
     log_debug "checking if destination dataset '$DST_DATASET_CURRENT' exists ..."
     if dataset_exists false $DST_DATASET_CURRENT; then
       log_debug "... '$DST_DATASET_CURRENT' exists."
-      if [ "$SRC_ENCRYPTED" == "true" ]; then
+      if [ "$SRC_ENCRYPTED" = "true" ]; then
         log_error "You cannot initially send an encrypted dataset into an existing one."
         stop $EXIT_ERROR
       fi
@@ -1221,7 +1390,7 @@ function validate_dataset() {
         log_debug "... encryption supported"
       else
         log_debug "... encryption not supported"
-        if [ "$SRC_ENCRYPTED" == "true" ]; then
+        if [ "$SRC_ENCRYPTED" = "true" ]; then
           log_error "Source dataset '$1' is encrypted but target pool does not support encryption."
           stop $EXIT_ERROR
         fi
@@ -1232,9 +1401,9 @@ function validate_dataset() {
     load_dst_snapshots $DST_DATASET_CURRENT $1
     if [ -z "$DST_SNAPSHOT_LAST" ]; then
       log_error "Destination does not have a snapshot but source does."
-      if [ "$RESUME" == "true" ]; then
+      if [ "$RESUME" = "true" ]; then
         log_info "Look if initial sync can be resumed ..."
-        if [ "$(dataset_resume_token $DST_DATASET_CURRENT)" == "-" ]; then
+        if [ "$(dataset_resume_token $DST_DATASET_CURRENT)" = "-" ]; then
           log_error "... no resume token found. Please delete all snapshots and start with full sync."
         fi
       else
@@ -1254,11 +1423,11 @@ function validate_dataset() {
 # $1 src dataset name
 function resume() {
   # looking for resume token and resume previous aborted sync if necessary
-  if [ "$FIRST_RUN" == "false" ] && [ "$RESUME" == "true" ]; then
+  if [ "$FIRST_RUN" = "false" ] && [ "$RESUME" = "true" ]; then
     log_info "Looking for resume token ..."
     local resume_token
     resume_token=$(dataset_resume_token $DST_DATASET_CURRENT)
-    if [ "x$resume_token" == "x-" ] || [ "x$resume_token" == "x" ]; then
+    if [ "x$resume_token" = "x-" ] || [ "x$resume_token" = "x" ]; then
       log_info "... no sync to resume."
     else
       log_info "... resuming previous aborted sync with token '${resume_token:0:20}' ..."
@@ -1268,7 +1437,9 @@ function resume() {
         # reload destination snapshots to get last
         load_dst_snapshots $DST_DATASET_CURRENT $1
         # put hold on destination snapshot
-        execute_snapshot_hold false "$DST_SNAPSHOT_LAST"
+        if [ "$NO_HOLD_DEST" != "true" ]; then
+          execute_snapshot_hold false "$DST_SNAPSHOT_LAST"
+        fi
         log_info "Continue with new sync ..."
       else
         log_error "Error resuming previous aborted sync."
@@ -1301,7 +1472,7 @@ function create_snapshot() {
     fi
   fi
 
-  if [ "$VM_NO_FREEZE" == "true" ]; then
+  if [ "$VM_NO_FREEZE" = "true" ]; then
     log_info "Freeze of VM file system is skipped"
   else
     log_info "Freeze VM file system ..."
@@ -1325,7 +1496,7 @@ function create_snapshot() {
     fi
   fi
 
-  if [ ! "$VM_NO_FREEZE" == "true" ]; then
+  if [ "$VM_NO_FREEZE" != "true" ]; then
     log_info "Thaw VM filesystem ..."
     cmd="$(build_cmd "$SRC_TYPE" "$(qm_fs_thaw_cmd)")"
     if ! execute "$cmd"; then       
@@ -1341,7 +1512,7 @@ function send_snapshot() {
   log_info "sending snapshot ..."
   cmd="$(build_cmd "$SRC_TYPE" "$(zfs_snapshot_send_cmd "$ZFS_CMD" "$SRC_SNAPSHOT_LAST_SYNCED" "$SRC_SNAPSHOT_LAST")") | $(build_cmd "$DST_TYPE" "$(zfs_snapshot_receive_cmd "$ZFS_CMD_REMOTE" "$DST_DATASET_CURRENT")")"
   if execute "$cmd"; then
-    if [ "$FIRST_RUN" == "true" ]; then
+    if [ "$FIRST_RUN" = "true" ]; then
       [ -n "$DST_PROP" ] && log_info "setting properties at destination ... "
       for prop in "${DST_PROP_ARRAY[@]}"; do
         if [[ "$prop" =~ .*inherit$ ]]; then
@@ -1367,10 +1538,12 @@ function send_snapshot() {
     load_dst_snapshots $DST_DATASET_CURRENT $1
 
     # put hold on destination snapshot
-    execute_snapshot_hold false "$DST_SNAPSHOT_LAST"
+    if [ "$NO_HOLD_DEST" != "true" ]; then
+      execute_snapshot_hold false "$DST_SNAPSHOT_LAST"
+    fi
 
     # convert snapshot to bookmark
-    if [ "$BOOKMARK" == "true" ]; then
+    if [ "$BOOKMARK" = "true" ]; then
       log_info "converting snapshot '$SRC_SNAPSHOT_LAST' to bookmark ..."
       cmd="$(build_cmd "$SRC_TYPE" "$(zfs_bookmark_create_cmd $ZFS_CMD "$SRC_SNAPSHOT_LAST")")"
       if execute "$cmd"; then
@@ -1382,15 +1555,12 @@ function send_snapshot() {
     fi
   else
     log_error "Error sending snapshot."
-    [ "$FIRST_RUN" == "true" ] && help_permissions_receive
-    if [ "$INTERMEDIATE" == "true" ] || [ "$RESUME" == "true" ]; then
+    [ "$FIRST_RUN" = "true" ] && help_permissions_receive
+    if [ "$INTERMEDIATE" = "true" ] || [ "$RESUME" = "true" ]; then
       log_info "Keeping unsent snapshot $SRC_SNAPSHOT_LAST for later send."
     else
       log_info "Destroying unsent snapshot $SRC_SNAPSHOT_LAST ..."
-      if [ "$NO_HOLD" = "false" ]; then
-        execute_snapshot_release true "$SRC_SNAPSHOT_LAST"
-      fi
-      execute_snapshot_destroy true "$SRC_SNAPSHOT_LAST"
+      release_holds_and_destroy true "$SRC_SNAPSHOT_LAST"
     fi
     stop $EXIT_ERROR
   fi
@@ -1406,7 +1576,7 @@ function do_backup() {
 
   if [ -z "$SRC_SNAPSHOT_LAST" ]; then
     log_error "No snapshot found."
-    if [ "$DRYRUN" == "true" ]; then
+    if [ "$DRYRUN" = "true" ]; then
       log_info "dryrun using dummy snapshot '$1@dryrun_${SNAPSHOT_PREFIX}_${ID}_$(date_text)' ..."
       SRC_SNAPSHOT_LAST="$1@dryrun_${SNAPSHOT_PREFIX}_${ID}_$(date_text)"
     else
@@ -1415,7 +1585,7 @@ function do_backup() {
   fi
 
   # put hold on source snapshot
-  if [ "$NO_HOLD" = "false" ] && [ "$BOOKMARK" == "false" ]; then
+  if [ "$NO_HOLD" = "false" ] && [ "$BOOKMARK" = "false" ]; then
     execute_snapshot_hold true "$SRC_SNAPSHOT_LAST"
   fi
 
@@ -1435,10 +1605,7 @@ function do_backup() {
     log_info "Destroying old source snapshots ..."
     for snap in "${SRC_SNAPSHOTS[@]::${#SRC_SNAPSHOTS[@]}-$SRC_COUNT}"; do
       if [[ "$snap" =~ @ ]]; then
-        if [ "$NO_HOLD" = "false" ]; then
-          execute_snapshot_release true "$snap"
-        fi
-        execute_snapshot_destroy true "$snap"
+        release_holds_and_destroy true "$snap"
       else
         execute_bookmark_destroy true "$snap"
       fi
@@ -1448,10 +1615,7 @@ function do_backup() {
   if [ ${#DST_SNAPSHOTS[@]} -gt "$DST_COUNT" ]; then
     log_info "Destroying old destination snapshots ..."
     for snap in "${DST_SNAPSHOTS[@]::${#DST_SNAPSHOTS[@]}-$DST_COUNT}"; do
-      if [ "$NO_HOLD" = "false" ]; then
-        execute_snapshot_release false "$snap"
-      fi
-      execute_snapshot_destroy false "$snap"
+      release_holds_and_destroy false "$snap"
     done
   fi
 }
@@ -1466,10 +1630,7 @@ function do_cleanup_old() {
     log_info "Destroying old source snapshots ..."
     for snap in "${SRC_SNAPSHOTS[@]::${#SRC_SNAPSHOTS[@]}-$SRC_COUNT}"; do
       if [[ "$snap" =~ @ ]]; then
-        if [ "$NO_HOLD" = "false" ]; then
-          execute_snapshot_release true "$snap"
-        fi
-        execute_snapshot_destroy true "$snap"
+        release_holds_and_destroy true "$snap"
       else
         execute_bookmark_destroy true "$snap"
       fi
@@ -1569,7 +1730,10 @@ MOUNT=$MOUNT
 # ${NO_OVERRIDE_HElP[1]}
 NO_OVERRIDE=$NO_OVERRIDE
 # $NO_HOLD_HELP
+# $NO_HOLD_NOTE
 NO_HOLD=$NO_HOLD
+# NO_HOLD_DEST_Help
+NO_HOLD_DEST=$NO_HOLD_DEST
 # $DEBUG_HELP
 DEBUG=$DEBUG
 
@@ -1649,10 +1813,10 @@ load_config
 start
 distro_dependent_commands
 validate
-if [ "$MAKE_CONFIG" == "true" ]; then
+if [ "$MAKE_CONFIG" = "true" ]; then
   create_config
 else
-  if [ "$VM_CONF_SRC" == "$PVE_CONF_DIR/$VM_ID.conf" ]; then
+  if [ "$VM_CONF_SRC" = "$PVE_CONF_DIR/$VM_ID.conf" ]; then
     for sds in "${SRC_DATASETS[@]}"; do
       log_info "Executing backup for dataset '$sds' ..."
       validate_dataset $sds
@@ -1666,7 +1830,7 @@ else
       do_cleanup_old $sds
     done
   fi
-  if [ "$EXECUTION_ERROR" == "true" ]; then
+  if [ "$EXECUTION_ERROR" = "true" ]; then
     log_error "... zfs-backup-pve finished with errors."
     stop $EXIT_WARN
   else
