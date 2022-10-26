@@ -1461,8 +1461,7 @@ function conf_backup() {
   fi
 }
 
-# $1 dataset
-function create_snapshot() {
+function create_snapshots() {
   local cmd
   if [ -n "$PRE_SNAPSHOT" ]; then
     if ! execute "$PRE_SNAPSHOT"; then
@@ -1496,12 +1495,15 @@ function create_snapshot() {
     fi
   fi
 
-  cmd="$(build_cmd "$SRC_TYPE" "$(zfs_snapshot_create_cmd "$ZFS_CMD" "$1")")"
-  log_info "Creating new snapshot for sync ..."
-  if ! execute "$cmd"; then
-    log_error "Error creating new snapshot."
-    stop $EXIT_ERROR
-  fi
+  for sds in "${SRC_DATASETS[@]}"; do
+    cmd="$(build_cmd "$SRC_TYPE" "$(zfs_snapshot_create_cmd "$ZFS_CMD" "$sds")")"
+    log_info "Creating new snapshot for sync ..."
+    if ! execute "$cmd"; then
+      log_error "Error creating new snapshot."
+      stop $EXIT_ERROR
+    fi
+  done
+
   if [ -n "$POST_SNAPSHOT" ]; then
     if ! execute "$POST_SNAPSHOT"; then
       log_error "Error executing post snapshot command/script ..."
@@ -1581,9 +1583,6 @@ function send_snapshot() {
 
 # $1 dataset
 function do_backup() {
-  # create snapshot
-  create_snapshot $1
-
   # reload source snapshots to get last
   load_src_snapshots $1
 
@@ -1832,6 +1831,10 @@ else
       log_info "Executing backup for dataset '$sds' ..."
       validate_dataset $sds
       resume $sds
+      do_backup $sds
+    done
+    create_snapshots
+    for sds in "${SRC_DATASETS[@]}"; do
       do_backup $sds
     done
     conf_backup
