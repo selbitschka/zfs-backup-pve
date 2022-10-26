@@ -130,7 +130,7 @@ readonly ID_HELP=("Unique ID of backup destination (default: md5sum of destinati
 readonly SEND_PARAMETER_HELP="Parameters used for 'zfs send' command. If set these parameters are use and all other settings (see below) are ignored."
 readonly RECEIVE_PARAMETER_HELP="Parameters used for 'zfs receive' command. If set these parameters are use and all other settings (see below) are ignored."
 
-readonly BOOKMARK_HELP="Use bookmark (if supported) instead of snapshot on source dataset. Ignored if '-ss, --src-count' is greater 1."
+readonly BOOKMARK_HELP="Use bookmark (if supported) instead of snapshot on source dataset. Ignored if '-ss, --src-count' is greater 1. Do not use if you use PVE replication, since bookmarks are not replicated."
 readonly RESUME_HELP="Make sync resume able and resume interrupted streams. User '-s' option during receive."
 readonly MOUNT_HELP="Try to mount received dataset on destination. Option '-u' is NOT used during receive."
 readonly INTERMEDIATE_HElP=("Use '-I' instead of '-i' while sending to keep intermediary snapshots." "If set, created but not send snapshots are kept, otherwise they are deleted.")
@@ -847,14 +847,19 @@ function qm_fs_freeze_cmd() {
   echo "$QM_CMD guest cmd $VM_ID fsfreeze-freeze"
 }
 
-# command used to freeze vm
+# command used to get freeze state of  vm
 function qm_fs_state_cmd() {
   echo "$QM_CMD guest cmd $VM_ID fsfreeze-status"
 }
 
-# command used to freeze vm
+# command used to unfreeze vm
 function qm_fs_thaw_cmd() {
   echo "$QM_CMD guest cmd $VM_ID fsfreeze-thaw"
+}
+
+# command used to check vm state
+function qm_state_cmd() {
+  echo "$QM_CMD status $VM_ID"
 }
 
 # remove dataset from snapshot or bookmark fully qualified name
@@ -1464,12 +1469,26 @@ function conf_backup() {
 
 # $1 dataset
 function create_snapshot() {
-  local cmds
+  local cmd
   if [ -n "$PRE_SNAPSHOT" ]; then
     if ! execute "$PRE_SNAPSHOT"; then
       log_error "Error executing pre snapshot command/script ..."
       stop $EXIT_ERROR
     fi
+  fi
+
+  local vm_state
+  log_info "Check VM state ..."
+  cmd="$(build_cmd "$SRC_TYPE" "$(qm_state_cmd)")"
+  vm_state="$($cmd)"
+  if [[ $vm_state == *running ]]; then
+    log_info "VM is running."
+  elif [[ $vm_state == *stopped ]]; then
+    log_info "VM is stopped."
+    VM_NO_FREEZE="true"
+  else
+    log_error "VM has undefined state '$vm_state' - abort."
+    stop $EXIT_ERROR
   fi
 
   if [ "$VM_NO_FREEZE" = "true" ]; then
@@ -1732,7 +1751,7 @@ NO_OVERRIDE=$NO_OVERRIDE
 # $NO_HOLD_HELP
 # $NO_HOLD_NOTE
 NO_HOLD=$NO_HOLD
-# NO_HOLD_DEST_Help
+# $NO_HOLD_DEST_Help
 NO_HOLD_DEST=$NO_HOLD_DEST
 # $DEBUG_HELP
 DEBUG=$DEBUG
