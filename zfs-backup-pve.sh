@@ -132,7 +132,6 @@ readonly RECEIVE_PARAMETER_HELP="Parameters used for 'zfs receive' command. If s
 
 readonly BOOKMARK_HELP="Use bookmark (if supported) instead of snapshot on source dataset. Ignored if '-ss, --src-count' is greater 1. Do not use if you use PVE replication, since bookmarks are not replicated."
 readonly RESUME_HELP="Make sync resume able and resume interrupted streams. User '-s' option during receive."
-readonly MOUNT_HELP="Try to mount received dataset on destination. Option '-u' is NOT used during receive."
 readonly INTERMEDIATE_HElP=("Use '-I' instead of '-i' while sending to keep intermediary snapshots." "If set, created but not send snapshots are kept, otherwise they are deleted.")
 readonly NO_OVERRIDE_HElP=("By default option '-F' is used during receive to discard changes made in destination dataset." "If you use this option receive will fail if destination was changed.")
 readonly DECRYPT_HElP=("By default encrypted source datasets are send in raw format using send option '-w'." "This options disables that and sends encrypted (mounted) datasets in plain.")
@@ -195,7 +194,6 @@ Parameters
   --resume                       $RESUME_HELP
   --intermediary                 ${INTERMEDIATE_HElP[0]}
                                  ${INTERMEDIATE_HElP[1]}
-  --mount                        $MOUNT_HELP
   --no-override                  ${NO_OVERRIDE_HElP[0]}
                                  ${NO_OVERRIDE_HElP[1]}
   --decrypt                      ${DECRYPT_HElP[0]}
@@ -361,10 +359,6 @@ while [[ $# -gt 0 ]]; do
     ;;
   --intermediary)
     INTERMEDIATE=true
-    shift
-    ;;
-  --mount)
-    MOUNT=true
     shift
     ;;
   --no-override)
@@ -1743,15 +1737,13 @@ RESUME=$RESUME
 # ${INTERMEDIATE_HElP[0]}
 # ${INTERMEDIATE_HElP[1]}
 INTERMEDIATE=$INTERMEDIATE
-# $MOUNT_HELP
-MOUNT=$MOUNT
 # ${NO_OVERRIDE_HElP[0]}
 # ${NO_OVERRIDE_HElP[1]}
 NO_OVERRIDE=$NO_OVERRIDE
 # $NO_HOLD_HELP
 # $NO_HOLD_NOTE
 NO_HOLD=$NO_HOLD
-# $NO_HOLD_DEST_Help
+# $NO_HOLD_DEST_HELP
 NO_HOLD_DEST=$NO_HOLD_DEST
 # $DEBUG_HELP
 DEBUG=$DEBUG
