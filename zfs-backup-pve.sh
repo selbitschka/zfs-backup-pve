@@ -2,7 +2,7 @@
 # shellcheck disable=SC2091
 # shellcheck disable=SC2086
 
-readonly VERSION='1.0.1'
+readonly VERSION='1.1.0'
 
 # return codes
 readonly EXIT_OK=0
@@ -35,6 +35,7 @@ LOG_ERROR="[ERROR]"
 LOG_CMD="[COMMAND]"
 SNAPSHOT_PREFIX="bkp"
 SNAPSHOT_HOLD_TAG="zfsbackup"
+SNAPSHOT_USE_QM="false"
 
 # pve
 readonly PVE_NODE_NAME="$(hostname)"
@@ -113,6 +114,8 @@ readonly VM_SNAP_DESC_HELP="Desciption of snapshot (default: $VM_SNAP_DESC)."
 readonly VM_CONF_DEST_HELP="Destionation to copy VM config to. If not set VM config is not backuped."
 readonly VM_NO_FREEZE_HELP="Do not freeze VM file system before creating a snapshot. By default a fsfreeze is exucuted and script exits if this fails, i.e if no qemu agent is installed."
 
+readonly SNAPSHOT_USE_QM_HELP="Use 'qm' command to create and delete snapshots instead of zfs directly. This makes snapshots visible in GUI but may interfere with replication."
+
 readonly SRC_TYPE_HELP="Type of source dataset: '$TYPE_LOCAL' or '$TYPE_LOCAL' (default: local)."
 readonly SRC_COUNT_HELP="Number (greater 0) of successful sent snapshots to keep on source side (default: 1)."
 readonly DST_DATASET_HELP="Name of the receiving dataset (destination)."
@@ -170,6 +173,8 @@ Parameters
   -c,  --config    [file]        Config file to load parameter from.
   --create-config                Create a config file base on given commandline parameters.
                                  If a config file ('-c') is use the output is written to that file.
+
+  -qm                            $SNAPSHOT_USE_QM_HELP
 
   -vm, --vmid      [id]          $VM_ID_HELP
   --vm-state                     $VM_STATE_HELP
@@ -273,6 +278,10 @@ while [[ $# -gt 0 ]]; do
     ;;
   --create-config)
     MAKE_CONFIG=true
+    shift
+    ;;
+  -qm)
+    SNAPSHOT_USE_QM="true"
     shift
     ;;
   -vm | --vmid)
@@ -856,6 +865,29 @@ function qm_state_cmd() {
   echo "$QM_CMD status $VM_ID"
 }
 
+# command used to create a snapshot
+function qm_create_snapshot_cmd() {
+  local cmd
+  local args
+  args=("$QM_CMD" "snapshot" "$VM_ID" "${SNAPSHOT_PREFIX}_${ID}_$(date_text)" "--description" "'Automated from ZFSBackup for $ID'")
+  cmd="${args[*]}"
+  if [ "$VM_STATE" = "true" ]; then
+    cmd="$cmd --vmstate true"
+  fi
+  echo $cmd
+}
+
+# command used to delete a snapshot
+# $1 snapshot name
+function qm_delete_snapshot_cmd() {
+  echo "$QM_CMD delsnapshot $VM_ID $1 --force true"
+}
+
+# command used to list snapshot
+function qm_list_snapshots_cmd() {
+  echo "$QM_CMD listsnapshot $VM_ID"
+}
+
 # remove dataset from snapshot or bookmark fully qualified name
 # $1 dataset name
 # $2 full name including snapshot/bookmark name
@@ -1078,12 +1110,35 @@ function execute_bookmark_destroy() {
   else
     cmd="$(build_cmd $DST_TYPE "$(zfs_bookmark_destroy_cmd $ZFS_CMD_REMOTE "$2")")"
   fi
-  log_info "... destroying bookmark $2"
+  log_info "... destroying bookmark $2 ..."
   if execute "$cmd"; then
     log_debug "... bookmark $2 destroyed."
   else
     log_error "Error destroying bookmark $2."
     EXECUTION_ERROR=true
+  fi
+}
+
+# $1 snapshotname
+function qm_snapshot_destroy() {
+  local cmd
+  local args
+  local snaps
+  if [ "$SNAPSHOT_USE_QM" = "true" ]; then
+    cmd="$(qm_list_snapshots_cmd) | grep '$1'"
+    log_cmd "$cmd"
+    snaps=$(eval "$cmd")
+    if [ -n "$snaps" ]; then
+      cmd="$(qm_delete_snapshot_cmd "$1")"
+      log_info "... destroying snapshot "$1" using qm ..."
+      if execute "$cmd"; then
+        log_debug "... snapshot "$1" destroyed."
+      else
+        log_error "Error destroying snapshot "$1"."
+      fi
+    else
+      log_debug "... snapshot '"$1"' not found in qm snapshot list."
+    fi
   fi
 }
 
@@ -1246,7 +1301,7 @@ function load_src_datasets() {
   local dataset
   local disk_pattern
   disk_pattern=${VM_DISK_PATTERN//%VM_ID%/$VM_ID}
-  cmd="grep '$disk_pattern' $VM_CONF_SRC | sed 's/.*. //' | sed 's/,.*//'"
+  cmd="$QM_CMD config $VM_ID | grep '$disk_pattern' | sed 's/.*. //' | sed 's/,.*//'"
   log_debug "getting disks attached to vm $VM_ID ..."
   log_cmd "$cmd"
   disks=$(eval "$cmd")
@@ -1461,7 +1516,7 @@ function conf_backup() {
   fi
 }
 
-function create_snapshots() {
+function create_snapshot() {
   local cmd
   if [ -n "$PRE_SNAPSHOT" ]; then
     if ! execute "$PRE_SNAPSHOT"; then
@@ -1495,14 +1550,28 @@ function create_snapshots() {
     fi
   fi
 
-  for sds in "${SRC_DATASETS[@]}"; do
-    cmd="$(build_cmd "$SRC_TYPE" "$(zfs_snapshot_create_cmd "$ZFS_CMD" "$sds")")"
-    log_info "Creating new snapshot for sync ..."
+  if [ "$SNAPSHOT_USE_QM" = "true" ]; then
+    cmd="$(build_cmd "$SRC_TYPE" "$(qm_create_snapshot_cmd)")"
+    log_info "Creating new snapshot for sync using qm ..."
     if ! execute "$cmd"; then
       log_error "Error creating new snapshot."
+      thaw
       stop $EXIT_ERROR
     fi
-  done
+  else
+    log_info "Creating new snapshot for sync using zfs ..."
+    for sds in "${SRC_DATASETS[@]}"; do
+      log_info "... creating snapshot for $sds ..."
+      cmd="$(build_cmd "$SRC_TYPE" "$(zfs_snapshot_create_cmd "$ZFS_CMD" "$sds")")"
+      if ! execute "$cmd"; then
+        log_error "Error creating new snapshot."
+        thaw
+        stop $EXIT_ERROR
+      fi
+    done
+  fi
+
+  thaw
 
   if [ -n "$POST_SNAPSHOT" ]; then
     if ! execute "$POST_SNAPSHOT"; then
@@ -1510,11 +1579,13 @@ function create_snapshots() {
       EXECUTION_ERROR=true
     fi
   fi
+}
 
+function thaw() {
   if [ "$VM_NO_FREEZE" != "true" ]; then
     log_info "Thaw VM filesystem ..."
     cmd="$(build_cmd "$SRC_TYPE" "$(qm_fs_thaw_cmd)")"
-    if ! execute "$cmd"; then       
+    if ! execute "$cmd"; then
       log_error "Error thawing VM."
       EXECUTION_ERROR=true
     fi
@@ -1612,16 +1683,18 @@ function do_backup() {
   send_snapshot $1
 
   # cleanup successfully send snapshots on both sides
-  load_src_snapshots $1
-  if [ ${#SRC_SNAPSHOTS[@]} -gt "$SRC_COUNT" ]; then
-    log_info "Destroying old source snapshots ..."
-    for snap in "${SRC_SNAPSHOTS[@]::${#SRC_SNAPSHOTS[@]}-$SRC_COUNT}"; do
-      if [[ "$snap" =~ @ ]]; then
-        release_holds_and_destroy true "$snap"
-      else
-        execute_bookmark_destroy true "$snap"
-      fi
-    done
+  if [ ! "$SNAPSHOT_USE_QM" = "true" ]; then
+    load_src_snapshots $1
+    if [ ${#SRC_SNAPSHOTS[@]} -gt "$SRC_COUNT" ]; then
+      log_info "Destroying old source snapshots ..."
+      for snap in "${SRC_SNAPSHOTS[@]::${#SRC_SNAPSHOTS[@]}-$SRC_COUNT}"; do
+        if [[ "$snap" =~ @ ]]; then
+          release_holds_and_destroy true "$snap"
+        else
+          execute_bookmark_destroy true "$snap"
+        fi
+      done
+    fi
   fi
 
   if [ ${#DST_SNAPSHOTS[@]} -gt "$DST_COUNT" ]; then
@@ -1647,6 +1720,20 @@ function do_cleanup_old() {
         execute_bookmark_destroy true "$snap"
       fi
     done
+  fi
+}
+
+function cleanup_source_using_qm() {
+  local first_dataset
+  if [ "$SNAPSHOT_USE_QM" = "true" ] && [ ${#SRC_DATASETS[@]} -gt "0" ]; then
+    first_dataset=${SRC_DATASETS[0]}
+    load_src_snapshots "$first_dataset"
+    if [ ${#SRC_SNAPSHOTS[@]} -gt "$SRC_COUNT" ]; then
+      log_info "Destroying old source snapshots ..."
+      for snap in "${SRC_SNAPSHOTS[@]::${#SRC_SNAPSHOTS[@]}-$SRC_COUNT}"; do
+        qm_snapshot_destroy "$(snapshot_name $first_dataset $snap)"
+      done
+    fi
   fi
 }
 
@@ -1714,6 +1801,8 @@ DST_PROP=$DST_PROP
 # Snapshot pre-/postfix and hold tag
 #SNAPSHOT_PREFIX=\"bkp\"
 #SNAPSHOT_HOLD_TAG=\"zfsbackup\"
+# $SNAPSHOT_USE_QM_HELP
+#SNAPSHOT_USE_QM=false
 
 ## SSH parameter
 # $SSH_HOST_HELP
@@ -1827,16 +1916,15 @@ if [ "$MAKE_CONFIG" = "true" ]; then
   create_config
 else
   if [ "$VM_CONF_SRC" = "$PVE_CONF_DIR/$VM_ID.conf" ]; then
+    log_info "Creating snapshot(s) ..."
+    create_snapshot
     for sds in "${SRC_DATASETS[@]}"; do
-      log_info "Executing backup for dataset '$sds' ..."
+      log_info "Backup dataset '$sds' ..."
       validate_dataset $sds
       resume $sds
       do_backup $sds
     done
-    create_snapshots
-    for sds in "${SRC_DATASETS[@]}"; do
-      do_backup $sds
-    done
+    cleanup_source_using_qm
     conf_backup
   else
     for sds in "${SRC_DATASETS[@]}"; do
