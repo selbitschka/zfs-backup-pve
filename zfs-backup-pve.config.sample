@@ -73,6 +73,18 @@ SSH_KEY=""
 # SSH_OPT="-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"
 SSH_OPT="-o ConnectTimeout=10"
 
+## E-Mail Notification
+# To enable email notification set $MAIL_TO parameter.
+# E-Mail address where notification is sent to. If not set email notifications are disabled.
+#MAIL_TO=""
+# E-Mail address used in from header (default: zfs-pve-backup@pve1).
+#MAIL_FROM="zfs-pve-backup@pve1"
+# Subject of email (default: '[ZFS-PVE-BACKUP] - %RESULT% - %VMID% - %ID% - %DATE%'). Placeholders: %RESULT%, %VMID%, %ID% and %DATE%.
+#MAIL_SUBJECT="[ZFS-PVE-BACKUP] - %RESULT% - %VMID% - %ID% - %DATE%"
+# By default emails are only send on error, if you use --mail-on-success emails are sent on every result.
+#MAIL_ON_SUCCESS=false
+
+
 # Backup style configuration
 # Use bookmark (if supported) instead of snapshot on source dataset. Ignored if '-ss, --src-count' is greater 1.
 #BOOKMARK=true

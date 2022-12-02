@@ -2,7 +2,15 @@
 # shellcheck disable=SC2091
 # shellcheck disable=SC2086
 
-readonly VERSION='1.1.0'
+# Release Notes
+# 1.2.0
+# - Add email notification support.
+# - Create new logfile for each run and delete old ones.
+# 1.1.0
+# - Use qm for visible snapshots.
+# - Create all snapshots for all datasets during one freeze.
+
+readonly VERSION='1.2.0'
 
 # return codes
 readonly EXIT_OK=0
@@ -27,6 +35,9 @@ QM_CMD=
 # defaults
 CONFIG_FILE=
 LOG_FILE=
+LOG_FILE_SEARCH=
+LOG_FILE_DATE_PATTERN="%Y%m%d_%H%M%S"
+LOG_FILE_KEEP=5
 LOG_DATE_PATTERN="%Y-%m-%d - %H:%M:%S"
 LOG_DEBUG="[DEBUG]"
 LOG_INFO="[INFO]"
@@ -104,15 +115,20 @@ SSH_KEY=
 SSH_OPT="-o ConnectTimeout=10"
 #SSH_OPT="-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"
 
+MAIL_FROM="zfs-pve-backup@$(hostname -f)"
+MAIL_TO=
+MAIL_SUBJECT="[ZFS-PVE-BACKUP] - %RESULT% - %VMID% - %ID% - %DATE%"
+MAIL_ON_SUCCESS=false
+
 FIRST_RUN=false
 EXECUTION_ERROR=false
 
 # help text
 readonly VM_ID_HELP="VM ID of virtual machine to backup."
 readonly VM_STATE_HELP="Save VM state (RAM) during snapshot. If not present state is not saved."
-readonly VM_SNAP_DESC_HELP="Desciption of snapshot (default: $VM_SNAP_DESC)."
-readonly VM_CONF_DEST_HELP="Destionation to copy VM config to. If not set VM config is not backuped."
-readonly VM_NO_FREEZE_HELP="Do not freeze VM file system before creating a snapshot. By default a fsfreeze is exucuted and script exits if this fails, i.e if no qemu agent is installed."
+readonly VM_SNAP_DESC_HELP="Description of snapshot (default: $VM_SNAP_DESC)."
+readonly VM_CONF_DEST_HELP="Destination to copy VM config to. If not set VM config is not backed up."
+readonly VM_NO_FREEZE_HELP="Do not freeze VM file system before creating a snapshot. By default a fsfreeze is executed and script exits if this fails, i.e if no qemu agent is installed."
 
 readonly SNAPSHOT_USE_QM_HELP="Use 'qm' command to create and delete snapshots instead of zfs directly. This makes snapshots visible in GUI but may interfere with replication."
 
@@ -141,7 +157,8 @@ readonly DECRYPT_HElP=("By default encrypted source datasets are send in raw for
 readonly NO_HOLD_HELP="Do not put hold tag on snapshots created by this tool."
 readonly NO_HOLD_NOTE="NOTE: If you do not use bookmarks and use replication on you pve hosts disable holds on your snapshot because migrations will fail since old snapshots could not be removed."
 readonly NO_HOLD_DEST_HELP="Do not put hold tag on destination snapshots."
-readonly LOG_FILE_HELP="Logfile to log to."
+readonly LOG_FILE_HELP="Logfile to log to, date will be appended."
+readonly LOG_FILE_KEEP_HELP="Number of logfiles to keep (default: $LOG_FILE_KEEP)."
 readonly DEBUG_HELP="Print executed commands and other debugging information."
 
 readonly ONLY_IF_HELP=("Command or script to check preconditions, if command fails backup is not started." "Examples:" "check IP: [[ \\\"\\\$(ip -4 addr show wlp5s0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}')\\\" =~ 192\\.168\\.2.* ]]" "check wifi: [[ \\\"\\\$(iwgetid -r)\\\" == \\\"ssidname\\\" ]]")
@@ -149,6 +166,11 @@ readonly PRE_RUN_HELP="Command or script to be executed before anything else is 
 readonly POST_RUN_HELP="Command or script to be executed after the this script is finished."
 readonly PRE_SNAPSHOT_HELP="Command or script to be executed before snapshot is made (i.e. to lock databases)."
 readonly POST_SNAPSHOT_HELP="Command or script to be executed after snapshot is made."
+
+readonly MAIL_FROM_HELP="E-Mail address used in from header (default: $MAIL_FROM)."
+readonly MAIL_TO_HELP="E-Mail address where notification is sent to. If not set email notifications are disabled."
+readonly MAIL_SUBJECT_HELP="Subject of email (default: '$MAIL_SUBJECT'). Placeholders: %RESULT%, %VMID%, %ID% and %DATE%."
+readonly MAIL_ON_SUCCESS_HELP="By default emails are only send on error, if you use --mail-on-success emails are sent on every result."
 
 usage() {
   local usage
@@ -215,6 +237,7 @@ Parameters
   --post-snapshot  [command]     $POST_SNAPSHOT_HELP
 
   --log-file       [file]        $LOG_FILE_HELP
+  --log-file-keep  [number]      $LOG_FILE_KEEP_HELP
 
   -v,  --verbose                 $DEBUG_HELP
   --dryrun                       Do check inputs, dataset existence,... but do not create or destroy snapshot or transfer data.
@@ -233,6 +256,15 @@ If you use type 'ssh' you need to specify Host, Port, etc.
  --ssh_user [username]          $SSH_USER_HELP
  --ssh_key  [keyfile]           $SSH_KEY_HELP
  --ssh_opt  [options]           $SSH_OPT_HELP
+
+
+E-Mail Options
+--------------
+For email notification set following parameter
+ --mail-to         [email]       $MAIL_TO_HELP
+ --mail-from       [email]       $MAIL_FROM_HELP
+ --mail-subject    [subject]     $MAIL_SUBJECT_HELP
+ --mail-on-success               $MAIL_ON_SUCCESS_HELP
 
 Help
 ----
@@ -436,8 +468,32 @@ while [[ $# -gt 0 ]]; do
     shift
     shift
     ;;
+  --mail-to)
+    MAIL_TO="$2"
+    shift
+    shift
+    ;;
+  --mail-from)
+    MAIL_FROM="$2"
+    shift
+    shift
+    ;;
+  --mail-subject)
+    MAIL_SUBJECT="$2"
+    shift
+    shift
+    ;;
+  --mail-on-success)
+    MAIL_ON_SUCCESS=true
+    shift
+    ;;
    --log-file)
     LOG_FILE="$2"
+    shift
+    shift
+    ;;
+   --log-file-keep)
+    LOG_FILE_KEEP="$2"
     shift
     shift
     ;;
@@ -539,6 +595,10 @@ function load_config() {
   if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
     # shellcheck disable=SC1090
     . "$CONFIG_FILE"
+  fi
+  if [ -n "$LOG_FILE" ]; then
+    LOG_FILE_SEARCH="$LOG_FILE.*"
+    LOG_FILE="$LOG_FILE.$(date +"$LOG_FILE_DATE_PATTERN")"
   fi
 }
 
@@ -1595,7 +1655,7 @@ function thaw() {
 # $1 dataset
 function send_snapshot() {
   local cmd
-  log_info "sending snapshot ..."
+  log_info "sending snapshot '$SRC_SNAPSHOT_LAST' ..."
   cmd="$(build_cmd "$SRC_TYPE" "$(zfs_snapshot_send_cmd "$ZFS_CMD" "$SRC_SNAPSHOT_LAST_SYNCED" "$SRC_SNAPSHOT_LAST")") | $(build_cmd "$DST_TYPE" "$(zfs_snapshot_receive_cmd "$ZFS_CMD_REMOTE" "$DST_DATASET_CURRENT")")"
   if execute "$cmd"; then
     if [ "$FIRST_RUN" = "true" ]; then
@@ -1817,6 +1877,17 @@ SSH_KEY=\"$SSH_KEY\"
 # SSH_OPT=\"-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new\"
 SSH_OPT=\"$SSH_OPT\"
 
+## E-Mail Notification
+# To enable email notification set \$MAIL_TO parameter.
+# $MAIL_TO_HELP
+#MAIL_TO=\"$MAIL_TO\"
+# $MAIL_FROM_HELP
+#MAIL_FROM=\"$MAIL_FROM\"
+# $MAIL_SUBJECT_HELP
+#MAIL_SUBJECT=\"$MAIL_SUBJECT\"
+# $MAIL_ON_SUCCESS_HELP
+#MAIL_ON_SUCCESS=$MAIL_ON_SUCCESS
+
 # Backup style configuration
 # $BOOKMARK_HELP
 BOOKMARK=$BOOKMARK
@@ -1857,7 +1928,11 @@ PRE_SNAPSHOT=\"$PRE_SNAPSHOT\"
 POST_SNAPSHOT=\"$POST_SNAPSHOT\"
 
 # Logging options
+# LOG_FILE_HELP
 LOG_FILE=$LOG_FILE
+LOG_DATE_PATTERN=\"$LOG_FILE_DATE_PATTERN\"
+# $LOG_FILE_KEEP_HELP
+LOG_FILE_KEEP=$LOG_FILE_KEEP
 #LOG_DATE_PATTERN=\"%Y-%m-%d - %H:%M:%S\"
 #LOG_DEBUG=\"[DEBUG]\"
 #LOG_INFO=\"[INFO]\"
@@ -1871,6 +1946,20 @@ LOG_FILE=$LOG_FILE
   else
     echo "$config"
   fi
+}
+
+# $1 exit code
+function mail_subject() {
+  local subj
+  if [ $1 = $EXIT_ERROR ]; then
+    subj="${MAIL_SUBJECT//%RESULT%/"ERROR"}"
+  else
+    subj="${MAIL_SUBJECT//%RESULT%/"SUCCESS"}"
+  fi
+  subj="${subj//%VMID%/$VM_ID}"
+  subj="${subj//%ID%/$ID}"
+  subj="${subj//%DATE%/$(date +"$LOG_DATE_PATTERN")}"
+  echo $subj
 }
 
 function start() {
@@ -1896,6 +1985,19 @@ function start() {
 
 # $1 exit code
 function stop() {
+  if [ -n "$MAIL_TO" ]; then
+    if [ "$1" == "$EXIT_ERROR" ] || { [ "$1" == "$EXIT_OK" ] && [ "$MAIL_ON_SUCCESS" == "true" ]; }; then
+        log_debug "sending email ..."
+        local mail_subj
+        mail_subj="$(mail_subject $1)"
+        args=(-s "$mail_subj" -a "From: $MAIL_FROM" "$MAIL_TO")
+        if [ -n "$LOG_FILE" ]; then
+          mail "${args[@]}" < "$LOG_FILE"
+        else
+          echo "No logfile specified." | mail "${args[@]}"
+        fi
+    fi
+  fi
   if [ -n "$POST_RUN" ]; then
     log_debug "executing post run script ..."
     if execute "$POST_RUN" "false"; then
@@ -1903,6 +2005,15 @@ function stop() {
     else
       log_error "Error executing post run script, abort backup."
     fi
+  fi
+  # log cleanup
+  if [ -n "$LOG_FILE_SEARCH" ]; then
+    # shellcheck disable=SC2207
+    old_logs=($(find $LOG_FILE_SEARCH -type f | sort -n | head -n -"$LOG_FILE_KEEP"))
+    for file in ${old_logs[*]}; do
+        log_info "deleting old logfile $file"
+        rm $file
+    done
   fi
   exit $1
 }
