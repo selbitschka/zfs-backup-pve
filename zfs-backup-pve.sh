@@ -3,6 +3,8 @@
 # shellcheck disable=SC2086
 
 # Release Notes
+# 1.3.0
+# - Allow limit bandwidth by piping through cstream
 # 1.2.0
 # - Add email notification support.
 # - Create new logfile for each run and delete old ones.
@@ -10,7 +12,7 @@
 # - Use qm for visible snapshots.
 # - Create all snapshots for all datasets during one freeze.
 
-readonly VERSION='1.2.0'
+readonly VERSION='1.3.0'
 
 # return codes
 readonly EXIT_OK=0
@@ -31,6 +33,7 @@ MD5SUM_CMD=
 ZFS_CMD_REMOTE=
 ZPOOL_CMD_REMOTE=
 QM_CMD=
+CSTREAM_CMD=
 
 # defaults
 CONFIG_FILE=
@@ -122,6 +125,7 @@ MAIL_ON_SUCCESS=false
 
 FIRST_RUN=false
 EXECUTION_ERROR=false
+LIMIT_BANDWIDTH=
 
 # help text
 readonly VM_ID_HELP="VM ID of virtual machine to backup."
@@ -148,6 +152,7 @@ readonly SSH_OPT_HELP="Options used for connection (i.e: '-oStrictHostKeyCheckin
 readonly ID_HELP=("Unique ID of backup destination (default: md5sum of destination dataset and ssh host, if present)." "Required if you use multiple destinations to identify snapshots. Maximum of $ID_LENGTH characters or numbers.")
 readonly SEND_PARAMETER_HELP="Parameters used for 'zfs send' command. If set these parameters are use and all other settings (see below) are ignored."
 readonly RECEIVE_PARAMETER_HELP="Parameters used for 'zfs receive' command. If set these parameters are use and all other settings (see below) are ignored."
+readonly LIMIT_BANDWIDTH_HELP="Limit used bandwidth to given value in KB using cstream."
 
 readonly BOOKMARK_HELP="Use bookmark (if supported) instead of snapshot on source dataset. Ignored if '-ss, --src-count' is greater 1. Do not use if you use PVE replication, since bookmarks are not replicated."
 readonly RESUME_HELP="Make sync resume able and resume interrupted streams. User '-s' option during receive."
@@ -217,6 +222,7 @@ Parameters
                                  ${ID_HELP[1]}
   --send-param     [parameters]  $SEND_PARAMETER_HELP
   --recv-param     [parameters]  $RECEIVE_PARAMETER_HELP
+  --limit          [number]      $LIMIT_BANDWIDTH_HELP
   --bookmark                     $BOOKMARK_HELP
   --resume                       $RESUME_HELP
   --intermediary                 ${INTERMEDIATE_HElP[0]}
@@ -371,6 +377,11 @@ while [[ $# -gt 0 ]]; do
     ;;
   -dp | --dst-prop)
     DST_PROP="$2"
+    shift
+    shift
+    ;;
+  --limit)
+    LIMIT_BANDWIDTH="$2"
     shift
     shift
     ;;
@@ -1219,6 +1230,10 @@ function distro_dependent_commands() {
     QM_CMD=$(command -v qm)
   fi
 
+  if [ -z "$CSTREAM_CMD" ]; then
+    CSTREAM_CMD=$(command -v cstream)
+  fi
+
   if [ -z "$ZFS_CMD" ]; then
     ZFS_CMD=$(command -v zfs)
   fi
@@ -1655,8 +1670,20 @@ function thaw() {
 # $1 dataset
 function send_snapshot() {
   local cmd
+  local limit
   log_info "sending snapshot '$SRC_SNAPSHOT_LAST' ..."
-  cmd="$(build_cmd "$SRC_TYPE" "$(zfs_snapshot_send_cmd "$ZFS_CMD" "$SRC_SNAPSHOT_LAST_SYNCED" "$SRC_SNAPSHOT_LAST")") | $(build_cmd "$DST_TYPE" "$(zfs_snapshot_receive_cmd "$ZFS_CMD_REMOTE" "$DST_DATASET_CURRENT")")"
+  cmd="$(build_cmd "$SRC_TYPE" "$(zfs_snapshot_send_cmd "$ZFS_CMD" "$SRC_SNAPSHOT_LAST_SYNCED" "$SRC_SNAPSHOT_LAST")")"
+  if [ -n "$LIMIT_BANDWIDTH" ]; then
+    limit=$((LIMIT_BANDWIDTH*1024))
+    if [ "$limit" -ge 1024 ]; then
+      log_debug "limiting bandwith to $LIMIT_BANDWIDTH KB ..."
+      cmd="$cmd | $CSTREAM_CMD -t $limit"
+    else
+      log_error "--limit value must be a number larger then 0, current value '$LIMIT_BANDWIDTH' is not valid - no limit applied."
+      EXECUTION_ERROR=true
+    fi
+  fi
+  cmd="$cmd | $(build_cmd "$DST_TYPE" "$(zfs_snapshot_receive_cmd "$ZFS_CMD_REMOTE" "$DST_DATASET_CURRENT")")"
   if execute "$cmd"; then
     if [ "$FIRST_RUN" = "true" ]; then
       [ -n "$DST_PROP" ] && log_info "setting properties at destination ... "
@@ -1813,6 +1840,7 @@ function create_config() {
 #ZFS_CMD_REMOTE=$ZFS_CMD_REMOTE
 #ZPOOL_CMD_REMOTE=$ZFS_CMD_REMOTE
 #QM_CMD=$QM_CMD
+#CSTREAM_CMD=$CSTREAM_CMD
 
 ## VM Settings
 # $VM_ID_HELP
@@ -1857,6 +1885,9 @@ DST_COUNT=$DST_COUNT
 # ${DST_PROP_HELP[1]}
 # ${DST_PROP_HELP[2]}
 DST_PROP=$DST_PROP
+
+# $LIMIT_BANDWIDTH_HELP
+LIMIT_BANDWIDTH=$LIMIT_BANDWIDTH
 
 # Snapshot pre-/postfix and hold tag
 #SNAPSHOT_PREFIX=\"bkp\"

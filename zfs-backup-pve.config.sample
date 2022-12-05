@@ -11,7 +11,10 @@
 #QM_CMD=/usr/sbin/qm
 #MD5SUM_CMD=/usr/bin/md5sum
 #ZFS_CMD_REMOTE=/sbin/zfs
-#ZPOOL_CMD_REMOTE=/sbin/zfs
+#QM_CMD=/usr/sbin/qm
+#CSTREAM_CMD=/sbin/zfs
+
+#CSTREAM_CMD=/usr/bin/cstream
 
 ## VM Options
 # VM ID of virtual machine to backup
