@@ -23,9 +23,9 @@
 #VM_DISK_PATTERN="vm-%VM_ID%-disk-"
 # Save VM state (RAM) during snapshot
 #VM_STATE=false
-# Snapshot description
-VM_SNAP_DESC=zfsbackup
-# Directory at destination to backup config to. If not set config will not be backuped. 
+# Description of snapshot ' ($ID)' will be appended (default: 'Automated from ZFSBackup').
+VM_SNAP_DESC="Automated from ZFSBackup"
+# Directory at destination to backup config to. If not set config will not be backuped.
 VM_CONF_DEST=
 
 

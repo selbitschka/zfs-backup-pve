@@ -3,8 +3,11 @@
 # shellcheck disable=SC2086
 
 # Release Notes
+# 1.3.1
+# - Honor VM_SNAP_DESC in snapshot description.
+# - Cleanup unused functions.
 # 1.3.0
-# - Allow limit bandwidth by piping through cstream
+# - Allow limit bandwidth by piping through cstream.
 # 1.2.0
 # - Add email notification support.
 # - Create new logfile for each run and delete old ones.
@@ -52,10 +55,15 @@ SNAPSHOT_HOLD_TAG="zfsbackup"
 SNAPSHOT_USE_QM="false"
 
 # pve
-readonly PVE_NODE_NAME="$(hostname)"
-readonly PVE_QEMU_DIR="qemu-server"
-readonly PVE_NODES_DIR="/etc/pve/nodes"
-readonly PVE_CONF_DIR="$PVE_NODES_DIR/$PVE_NODE_NAME/$PVE_QEMU_DIR"
+readonly PVE_NODE_NAME
+readonly PVE_QEMU_DIR
+readonly PVE_NODES_DIR
+readonly PVE_CONF_DIR
+
+PVE_NODE_NAME="$(hostname)"
+PVE_QEMU_DIR="qemu-server"
+PVE_NODES_DIR="/etc/pve/nodes"
+PVE_CONF_DIR="$PVE_NODES_DIR/$PVE_NODE_NAME/$PVE_QEMU_DIR"
 
 # vm
 VM_ID=
@@ -130,7 +138,7 @@ LIMIT_BANDWIDTH=
 # help text
 readonly VM_ID_HELP="VM ID of virtual machine to backup."
 readonly VM_STATE_HELP="Save VM state (RAM) during snapshot. If not present state is not saved."
-readonly VM_SNAP_DESC_HELP="Description of snapshot (default: $VM_SNAP_DESC)."
+readonly VM_SNAP_DESC_HELP="Description of snapshot ' ($ID)' will be appended (default: '$VM_SNAP_DESC')."
 readonly VM_CONF_DEST_HELP="Destination to copy VM config to. If not set VM config is not backed up."
 readonly VM_NO_FREEZE_HELP="Do not freeze VM file system before creating a snapshot. By default a fsfreeze is executed and script exits if this fails, i.e if no qemu agent is installed."
 
@@ -277,18 +285,6 @@ Help
   -h,  --help              Print this message."
 
   echo "$help"
-}
-
-function help_permissions_send() {
-  local current_user
-  if [ "$SRC_TYPE" = "$TYPE_SSH" ] && [ "$SSH_USER" != "" ]; then
-    current_user=$SSH_USER
-  else
-    current_user=$(whoami)
-  fi
-  log_debug "Sending user '$current_user' maybe has not enough rights."
-  log_debug "To set right on sending side use:"
-  log_debug "zfs allow -u $current_user send,snapshot,hold,release,destroy,mount $SRC_DATASET"
 }
 
 function help_permissions_receive() {
@@ -940,7 +936,7 @@ function qm_state_cmd() {
 function qm_create_snapshot_cmd() {
   local cmd
   local args
-  args=("$QM_CMD" "snapshot" "$VM_ID" "${SNAPSHOT_PREFIX}_${ID}_$(date_text)" "--description" "'Automated from ZFSBackup for $ID'")
+  args=("$QM_CMD" "snapshot" "$VM_ID" "${SNAPSHOT_PREFIX}_${ID}_$(date_text)" "--description" "'$VM_SNAP_DESC ($ID)'")
   cmd="${args[*]}"
   if [ "$VM_STATE" = "true" ]; then
     cmd="$cmd --vmstate true"
@@ -1042,19 +1038,6 @@ function dataset_list_snapshots() {
     cmd="$(build_cmd "$SRC_TYPE" "$(zfs_snapshot_list_cmd $ZFS_CMD "$2")")"
   else
     cmd="$(build_cmd "$DST_TYPE" "$(zfs_snapshot_list_cmd $ZFS_CMD_REMOTE "$2")")"
-  fi
-  log_cmd "$cmd"
-  # shellcheck disable=SC2005
-  echo "$($cmd)"
-}
-
-# $1 is source
-function dataset_list_bookmarks() {
-  local cmd
-  if [ "$1" == "true" ]; then
-    cmd="$(build_cmd "$SRC_TYPE" "$(zfs_bookmark_list_cmd $ZFS_CMD "$SRC_DATASET")")"
-  else
-    cmd="$(build_cmd "$DST_TYPE" "$(zfs_bookmark_list_cmd $ZFS_CMD_REMOTE "$DST_DATASET")")"
   fi
   log_cmd "$cmd"
   # shellcheck disable=SC2005
@@ -1201,14 +1184,14 @@ function qm_snapshot_destroy() {
     snaps=$(eval "$cmd")
     if [ -n "$snaps" ]; then
       cmd="$(qm_delete_snapshot_cmd "$1")"
-      log_info "... destroying snapshot "$1" using qm ..."
+      log_info "... destroying snapshot $1 using qm ..."
       if execute "$cmd"; then
-        log_debug "... snapshot "$1" destroyed."
+        log_debug "... snapshot $1 destroyed."
       else
-        log_error "Error destroying snapshot "$1"."
+        log_error "Error destroying snapshot $1."
       fi
     else
-      log_debug "... snapshot '"$1"' not found in qm snapshot list."
+      log_debug "... snapshot '$1' not found in qm snapshot list."
     fi
   fi
 }
@@ -1376,7 +1359,7 @@ function load_src_datasets() {
   local dataset
   local disk_pattern
   disk_pattern=${VM_DISK_PATTERN//%VM_ID%/$VM_ID}
-  cmd="$QM_CMD config $VM_ID | grep '$disk_pattern' | sed 's/.*. //' | sed 's/,.*//'"
+  cmd="grep '$disk_pattern' $VM_CONF_SRC | sed 's/.*. //' | sed 's/,.*//' | sort -u"
   log_debug "getting disks attached to vm $VM_ID ..."
   log_cmd "$cmd"
   disks=$(eval "$cmd")
@@ -1556,7 +1539,7 @@ function resume() {
     log_info "Looking for resume token ..."
     local resume_token
     resume_token=$(dataset_resume_token $DST_DATASET_CURRENT)
-    if [ "x$resume_token" = "x-" ] || [ "x$resume_token" = "x" ]; then
+    if [ "$resume_token" = "-" ] || [ "$resume_token" = "" ]; then
       log_info "... no sync to resume."
     else
       log_info "... resuming previous aborted sync with token '${resume_token:0:20}' ..."
@@ -1793,18 +1776,30 @@ function do_backup() {
 }
 
 # $1 dataset
-function do_cleanup_old() {
+function do_cleanup_old_from_other() {
   # source snapshots to get last
   load_src_snapshots $1
   if [ -z "$SRC_SNAPSHOT_LAST" ]; then
     log_info "... no snapshot exists."
   else
-    log_info "Destroying old source snapshots ..."
-    for snap in "${SRC_SNAPSHOTS[@]::${#SRC_SNAPSHOTS[@]}-$SRC_COUNT}"; do
-      if [[ "$snap" =~ @ ]]; then
-        release_holds_and_destroy true "$snap"
-      else
-        execute_bookmark_destroy true "$snap"
+    load_dst_snapshots $DST_DATASET_CURRENT $1
+    log_info "Destroying source snapshots which no longer exists on destination ..."
+    local delete
+    for src_snap in "${SRC_SNAPSHOTS[@]}"; do
+      delete="true"
+      for dst_snap in "${DST_SNAPSHOTS[@]}"; do
+        if [ "$dst_snap" = "$src_snap" ]; then
+          delete="false"
+          log_info "Source snapshot $src_snap exists on destination and will retain."
+        fi
+      done
+      if [ "$delete" = "true" ]; then
+        log_info "Source snapshot $src_snap does not exits on destination and will be deleted."
+        if [[ "$src_snap" =~ @ ]]; then
+          release_holds_and_destroy true "$src_snap"
+        else
+          execute_bookmark_destroy true "$src_snap"
+        fi
       fi
     done
   fi
@@ -2041,7 +2036,7 @@ function stop() {
   if [ -n "$LOG_FILE_SEARCH" ]; then
     # shellcheck disable=SC2207
     old_logs=($(find $LOG_FILE_SEARCH -type f | sort -n | head -n -"$LOG_FILE_KEEP"))
-    for file in ${old_logs[*]}; do
+    for file in "${old_logs[@]}"; do
         log_info "deleting old logfile $file"
         rm $file
     done
@@ -2071,7 +2066,8 @@ else
   else
     for sds in "${SRC_DATASETS[@]}"; do
       log_info "Cleanup snapshot for dataset '$sds' created by other host ..."
-      do_cleanup_old $sds
+      DST_DATASET_CURRENT="$DST_DATASET/$(dataset_last_node $sds)"
+      do_cleanup_old_from_other $sds
     done
   fi
   if [ "$EXECUTION_ERROR" = "true" ]; then
