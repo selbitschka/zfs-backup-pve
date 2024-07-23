@@ -3,6 +3,8 @@
 # shellcheck disable=SC2086
 
 # Release Notes
+# 1.4.0
+# - Keep last backup snapshot before custom snapshots on src and destination
 # 1.3.1
 # - Honor VM_SNAP_DESC in snapshot description.
 # - Cleanup unused functions.
@@ -15,7 +17,7 @@
 # - Use qm for visible snapshots.
 # - Create all snapshots for all datasets during one freeze.
 
-readonly VERSION='1.3.0'
+readonly VERSION='1.4.0'
 
 # return codes
 readonly EXIT_OK=0
@@ -55,15 +57,10 @@ SNAPSHOT_HOLD_TAG="zfsbackup"
 SNAPSHOT_USE_QM="false"
 
 # pve
-readonly PVE_NODE_NAME
-readonly PVE_QEMU_DIR
-readonly PVE_NODES_DIR
-readonly PVE_CONF_DIR
-
-PVE_NODE_NAME="$(hostname)"
-PVE_QEMU_DIR="qemu-server"
-PVE_NODES_DIR="/etc/pve/nodes"
-PVE_CONF_DIR="$PVE_NODES_DIR/$PVE_NODE_NAME/$PVE_QEMU_DIR"
+readonly PVE_NODE_NAME="$(hostname)"
+readonly PVE_QEMU_DIR="qemu-server"
+readonly PVE_NODES_DIR="/etc/pve/nodes"
+readonly PVE_CONF_DIR="$PVE_NODES_DIR/$PVE_NODE_NAME/$PVE_QEMU_DIR"
 
 # vm
 VM_ID=
@@ -1286,6 +1283,7 @@ function load_src_snapshots() {
 
   SRC_SNAPSHOTS=()
   SRC_SNAPSHOT_LAST=
+  SRC_SNAPSHOT_KEEP=
 
   escaped_src_dataset="${1//\//\\/}"
   # shellcheck disable=SC1087
@@ -1298,6 +1296,10 @@ function load_src_snapshots() {
       log_debug "... add $snap"
     else
       log_debug "... $snap does not match pattern."
+      if [ -z "$SRC_SNAPSHOT_KEEP" ] && [ ${#SRC_SNAPSHOTS[@]} -gt 0 ]; then
+        SRC_SNAPSHOT_KEEP=${SRC_SNAPSHOTS[*]: -1}
+        log_debug "... keep backup snapshot $SRC_SNAPSHOT_KEEP before custom snapshot $snap."
+      fi
     fi
   done
 
@@ -1320,6 +1322,7 @@ function load_dst_snapshots() {
 
   DST_SNAPSHOTS=()
   DST_SNAPSHOT_LAST=
+  DST_SNAPSHOT_KEEP=
   SRC_SNAPSHOT_LAST_SYNCED=
 
   escaped_dst_dataset="${1//\//\\/}"
@@ -1331,6 +1334,16 @@ function load_dst_snapshots() {
     if [[ "$snap" =~ $pattern ]]; then
       log_debug "... add $snap"
       DST_SNAPSHOTS+=("$snap")
+      if [ -n "$SRC_SNAPSHOT_KEEP" ] && [ -z "$DST_SNAPSHOT_KEEP" ]; then
+        dst_name="$(snapshot_name $1 $snap)"
+        src_name="$(snapshot_name $2 $SRC_SNAPSHOT_KEEP)"
+        if [ "$src_name" = "$dst_name" ]; then
+          DST_SNAPSHOT_KEEP=$snap
+        fi
+        dst_name=
+        src_name=
+        log_debug "... keep backup snapshot $DST_SNAPSHOT_KEEP before custom snapshot."
+      fi
     else
       log_debug "... $snap does not match pattern."
     fi
@@ -1758,10 +1771,14 @@ function do_backup() {
     if [ ${#SRC_SNAPSHOTS[@]} -gt "$SRC_COUNT" ]; then
       log_info "Destroying old source snapshots ..."
       for snap in "${SRC_SNAPSHOTS[@]::${#SRC_SNAPSHOTS[@]}-$SRC_COUNT}"; do
-        if [[ "$snap" =~ @ ]]; then
-          release_holds_and_destroy true "$snap"
+        if [ "$snap" = "$SRC_SNAPSHOT_KEEP" ]; then
+          log_info "... keeping snapshot $snap, because its the last one or last one before non backup snapshots."
         else
-          execute_bookmark_destroy true "$snap"
+          if [[ "$snap" =~ @ ]]; then
+            release_holds_and_destroy true "$snap"
+          else
+            execute_bookmark_destroy true "$snap"
+          fi
         fi
       done
     fi
@@ -1770,7 +1787,11 @@ function do_backup() {
   if [ ${#DST_SNAPSHOTS[@]} -gt "$DST_COUNT" ]; then
     log_info "Destroying old destination snapshots ..."
     for snap in "${DST_SNAPSHOTS[@]::${#DST_SNAPSHOTS[@]}-$DST_COUNT}"; do
-      release_holds_and_destroy false "$snap"
+      if [ "$snap" = "$DST_SNAPSHOT_KEEP" ]; then
+        log_info "... keeping snapshot $snap, because its the last one or last one before non backup snapshots."
+      else
+        release_holds_and_destroy false "$snap"
+      fi
     done
   fi
 }
@@ -1807,13 +1828,17 @@ function do_cleanup_old_from_other() {
 
 function cleanup_source_using_qm() {
   local first_dataset
-  if [ "$SNAPSHOT_USE_QM" = "true" ] && [ ${#SRC_DATASETS[@]} -gt "0" ]; then
+  if [ "$SNAPSHOT_USE_QM" = "true" ] && [ ${#SRC_DATASETS[@]} -gt 0 ]; then
     first_dataset=${SRC_DATASETS[0]}
     load_src_snapshots "$first_dataset"
     if [ ${#SRC_SNAPSHOTS[@]} -gt "$SRC_COUNT" ]; then
       log_info "Destroying old source snapshots ..."
       for snap in "${SRC_SNAPSHOTS[@]::${#SRC_SNAPSHOTS[@]}-$SRC_COUNT}"; do
-        qm_snapshot_destroy "$(snapshot_name $first_dataset $snap)"
+        if [ "$snap" = "$SRC_SNAPSHOT_KEEP" ]; then
+          log_info "... keeping snapshot $snap, because its the last one or last one before non backup snapshots."
+        else
+          qm_snapshot_destroy "$(snapshot_name $first_dataset $snap)"
+        fi
       done
     fi
   fi
