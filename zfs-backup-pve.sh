@@ -1420,7 +1420,7 @@ function load_src_datasets() {
       log_info "... disk '$disk' has path '$path' which is not a zfs dataset and will be ignored."
     else
       log_error "... disk '$disk' has path '$path' which is not a zfs dataset - abort."
-      exit $EXIT_ERROR
+      stop $EXIT_ERROR
     fi
   done
   log_debug "found following source datasets: ${SRC_DATASETS[*]}"
